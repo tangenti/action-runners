@@ -51,17 +51,22 @@ jobs:
             exit 1
           fi
 
-      # ── Attest ───────────────────────────────────────────────────────────────
-      # actions/attest@v4 does two things when push-to-registry: true:
-      #   1. Signs the attestation with GitHub's Sigstore Fulcio CA (OIDC token).
-      #   2. Uploads the signed bundle to the GitHub Attestations API.
-      #   3. Pushes the bundle as an OCI 1.1 referrer to the target registry.
-      #
-      # NOTE: push-to-registry requires the registry to support OCI 1.1 referrers
-      # or the referrer tag fallback schema.  The stock registry:2 image (v2.8.3+)
-      # supports the referrers API (GET /v2/<name>/referrers/<digest>).
-      #
-      # subject-name must be the fully-qualified image name WITHOUT a tag.
+      # actions/attest-build-provenance reads ~/.docker/config.json to find the
+      # auth header for the target registry. Our local registry is anonymous,
+      # but the action throws "No credentials found" if no auths entry exists.
+      # Writing dummy credentials satisfies the lookup; the registry ignores them.
+      - name: Add dummy credentials for local registry
+        run: |
+          mkdir -p ~/.docker
+          if [ -f ~/.docker/config.json ]; then
+            jq '.auths["${{ env.REGISTRY }}"] = {"auth": "ZHVtbXk6ZHVtbXk="}' \
+              ~/.docker/config.json > /tmp/docker-config.json
+            mv /tmp/docker-config.json ~/.docker/config.json
+          else
+            echo '{"auths":{"${{ env.REGISTRY }}":{"auth":"ZHVtbXk6ZHVtbXk="}}}' \
+              > ~/.docker/config.json
+          fi
+
       - name: Attest build provenance
         id: attest
         uses: actions/attest-build-provenance@v4
