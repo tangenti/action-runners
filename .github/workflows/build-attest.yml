@@ -1,0 +1,81 @@
+name: build-attest
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+jobs:
+  build-and-attest:
+    runs-on: self-hosted
+
+    permissions:
+      id-token: write      # mint GitHub OIDC token → Sigstore Fulcio cert
+      attestations: write  # upload attestation to GitHub API
+      contents: read
+
+    env:
+      # The registry container (local-registry) is on the 'attest' Docker network.
+      # The runner container is on the same network, so it reaches it as local-registry:5000.
+      # From your Mac the same registry is at localhost:5001.
+      REGISTRY: local-registry:5000
+      IMAGE_NAME: hello-server
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Build ────────────────────────────────────────────────────────────────
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          # Use the host's Docker socket that the runner container mounts.
+          driver: docker
+
+      - name: Build and push image to local registry
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # Tag with the short SHA so every commit produces a unique image.
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          # Plain docker driver writes the digest to stdout; capture it below.
+
+      # docker/build-push-action sets steps.push.outputs.digest = sha256:...
+      # when driver=docker and push=true. Verify it is populated.
+      - name: Verify digest
+        run: |
+          echo "Digest: ${{ steps.push.outputs.digest }}"
+          if [ -z "${{ steps.push.outputs.digest }}" ]; then
+            echo "ERROR: digest is empty" >&2
+            exit 1
+          fi
+
+      # ── Attest ───────────────────────────────────────────────────────────────
+      # actions/attest@v4 does two things when push-to-registry: true:
+      #   1. Signs the attestation with GitHub's Sigstore Fulcio CA (OIDC token).
+      #   2. Uploads the signed bundle to the GitHub Attestations API.
+      #   3. Pushes the bundle as an OCI 1.1 referrer to the target registry.
+      #
+      # NOTE: push-to-registry requires the registry to support OCI 1.1 referrers
+      # or the referrer tag fallback schema.  The stock registry:2 image (v2.8.3+)
+      # supports the referrers API (GET /v2/<name>/referrers/<digest>).
+      #
+      # subject-name must be the fully-qualified image name WITHOUT a tag.
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Print attestation outputs
+        run: |
+          echo "Attestation ID  : ${{ steps.attest.outputs.attestation-id }}"
+          echo "Attestation URL : ${{ steps.attest.outputs.attestation-url }}"
+          echo "Bundle path     : ${{ steps.attest.outputs.bundle-path }}"
+          echo ""
+          echo "── Bundle contents (truncated) ──────────────────────────────────"
+          cat "${{ steps.attest.outputs.bundle-path }}" | python3 -m json.tool --indent 2 | head -60
