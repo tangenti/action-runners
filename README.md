@@ -1,30 +1,30 @@
 # attest
 
-Build provenance attestation demo using GitHub Actions, a self-hosted runner,
-and a local Docker registry.
+Build provenance attestation demo using GitHub Actions, the official
+self-hosted runner running natively on your Mac, and a local Docker registry.
 
 ## What this does
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  Your Mac (Docker Desktop)                                       │
+│  Your Mac                                                        │
 │                                                                  │
-│  Docker network "attest"                                         │
-│  ┌──────────────────┐              ┌───────────────────┐        │
-│  │  gh-runner       │──push image─►│  local-registry   │        │
-│  │  (Docker ctnr)   │              │  :5000 (internal) │        │
-│  └──────────────────┘              │  :5001 (host)     │        │
-│         ▲                          └───────────────────┘        │
-│         │ job dispatch                                           │
-└─────────┼────────────────────────────────────────────────────────┘
+│  ┌──────────────────────┐                                        │
+│  │  actions/runner      │──push image──► localhost:5001          │
+│  │  (native binary,     │                ┌───────────────────┐   │
+│  │   ~/actions-runner)  │                │  local-registry   │   │
+│  └──────────────────────┘                │  Docker container │   │
+│         ▲                                └───────────────────┘   │
+│         │ job dispatch                                            │
+└─────────┼─────────────────────────────────────────────────────────┘
           │
     GitHub Actions
     (triggers workflow on push)
           │
-          │  actions/attest-build-provenance@v2
+          │  actions/attest-build-provenance@v4
           │    ├─ signs with GitHub Sigstore Fulcio CA
           │    ├─ stores bundle → GitHub Attestations API
-          │    └─ pushes bundle as OCI referrer → local-registry:5000
+          │    └─ pushes bundle as OCI referrer → localhost:5001
           ▼
     GitHub Attestations API
     (keyed by image SHA256 digest)
@@ -61,10 +61,7 @@ chmod +x scripts/setup-registry.sh scripts/teardown.sh scripts/setup-runner.sh
 ./scripts/setup-registry.sh
 ```
 
-Creates:
-- Docker network **`attest`**
-- Container **`local-registry`** → `localhost:5001` on your Mac,
-  `local-registry:5000` from any container on the `attest` network
+Creates the Docker container **`local-registry`** → `localhost:5001` on your Mac.
 
 Verify:
 ```sh
@@ -83,31 +80,38 @@ No PAT or stored credential needed. GitHub issues a one-time ephemeral token
    ```
    https://github.com/<GITHUB_OWNER>/<GITHUB_REPO>/settings/actions/runners/new
    ```
-2. Select **Linux** / **x64**
+2. Select **macOS** / **ARM64** (or x64 on Intel)
 3. In the **Configure** section, find the `--token` line. Copy the token value
    — it starts with `AART...`
 
 ---
 
-## Step 4 — Start the self-hosted runner
+## Step 4 — Start the self-hosted runner (native binary on your Mac)
 
-The runner is a Docker container on the `attest` network. It mounts the host
-Docker socket so it can run `docker build` and `docker push`. Because it is on
-the same network as `local-registry`, it can push to `local-registry:5000`
-directly. It also reaches GitHub's OIDC endpoint for real Sigstore signing.
+This downloads the **official `actions/runner` release** from
+`github.com/actions/runner/releases`, extracts to `~/actions-runner`, registers
+the runner with your repo, and starts it in the foreground.
 
 ```sh
 export GITHUB_OWNER=<your-github-username-or-org>
 export GITHUB_REPO=<your-repo-name>
-export REGISTRATION_TOKEN=<token copied from GitHub UI in step 3>
+export RUNNER_TOKEN=<token copied from GitHub UI in step 3>
 
 ./scripts/setup-runner.sh
 ```
 
-Verify the runner appears in GitHub as **Idle**:
+The runner stays in the foreground printing `Listening for Jobs`. Leave this
+terminal open. Verify the runner appears in GitHub as **Idle**:
 ```
 https://github.com/<GITHUB_OWNER>/<GITHUB_REPO>/settings/actions/runners
 ```
+
+> **Run as a launchd service instead?** After registration, in another shell:
+> ```sh
+> cd ~/actions-runner
+> sudo ./svc.sh install
+> sudo ./svc.sh start
+> ```
 
 ---
 
@@ -224,12 +228,23 @@ localhost:5001/hello-server@sha256:...
 
 ## Teardown
 
+If the runner is in the foreground: **Ctrl-C** in the terminal where it runs.
+
+Then:
 ```sh
 ./scripts/teardown.sh
+```
 
-# Remove the stale runner entry from GitHub
-gh api repos/<GITHUB_OWNER>/<GITHUB_REPO>/actions/runners   # find the ID
-gh api -X DELETE repos/<GITHUB_OWNER>/<GITHUB_REPO>/actions/runners/<ID>
+This stops the registry container. The runner files stay in `~/actions-runner`
+so you can restart without re-downloading. To wipe them entirely:
+```sh
+rm -rf ~/actions-runner
+```
+
+To deregister the runner from GitHub (get a new token from the runners
+settings page first):
+```sh
+RUNNER_TOKEN=<new-token> ./scripts/teardown.sh
 ```
 
 ---
@@ -245,9 +260,9 @@ gh api -X DELETE repos/<GITHUB_OWNER>/<GITHUB_REPO>/actions/runners/<ID>
 │   └── workflows/
 │       └── build-attest.yml            # Build + push + attest workflow
 └── scripts/
-    ├── setup-registry.sh               # Create Docker network + local registry
-    ├── setup-runner.sh                 # Start self-hosted runner in Docker
-    └── teardown.sh                     # Stop runner + registry + remove network
+    ├── setup-registry.sh               # Start local-registry Docker container
+    ├── setup-runner.sh                 # Download + register + run actions/runner natively
+    └── teardown.sh                     # Stop registry, optionally deregister runner
 ```
 
 ---
@@ -255,7 +270,7 @@ gh api -X DELETE repos/<GITHUB_OWNER>/<GITHUB_REPO>/actions/runners/<ID>
 ## How the attestation works
 
 ```
-actions/attest-build-provenance@v2
+actions/attest-build-provenance@v4
 │
 ├─ 1. Mints a GitHub OIDC JWT (token.actions.githubusercontent.com)
 │      Claims: repo, workflow, ref, sha, runner_environment, ...
@@ -289,5 +304,6 @@ actions/attest-build-provenance@v2
 |---|---|
 | `registry:2` OCI 1.1 support | v2.8.3+ supports the Referrers API. The setup script pulls `registry:2` (latest). If `--bundle-from-oci` returns 404, force-pull a newer image: `docker pull registry:2`. |
 | Private repo attestations | Private repos use GitHub's private Sigstore CA with no public Rekor log. `gh attestation verify` handles this automatically. `cosign verify-attestation` additionally needs `gh attestation trusted-root > trusted_root.jsonl` and `--trusted-root trusted_root.jsonl`. |
-| Runner OIDC reachability | The runner container needs outbound HTTPS to `token.actions.githubusercontent.com`, `fulcio.githubapp.com`, and `api.github.com`. Docker Desktop on Mac allows this by default. |
-| Port 5000 on macOS | macOS Monterey+ reserves port 5000 for AirPlay Receiver. The registry is exposed on **5001** on the host; inside Docker it is still 5000. |
+| Runner OIDC reachability | The runner needs outbound HTTPS to `token.actions.githubusercontent.com`, `fulcio.githubapp.com`, and `api.github.com`. Standard internet egress on your Mac is fine. |
+| Port 5000 on macOS | macOS Monterey+ reserves port 5000 for AirPlay Receiver. The registry is exposed on **5001**. |
+| Org policy on self-hosted runners | If your org disables self-hosted runners on private repos, the workflow will fail with `No runner matching the specified labels`. Use a public repo to demo. |

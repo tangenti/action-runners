@@ -1,66 +1,90 @@
 #!/usr/bin/env bash
-# setup-runner.sh — Start a self-hosted GitHub Actions runner in Docker.
-#
-# The registration token is obtained manually from the GitHub UI — no PAT or
-# stored credential required.
+# setup-runner.sh — Download, register, and start the official GitHub Actions
+# runner binary natively on your Mac. No Docker, no third-party images.
 #
 # How to get the registration token:
 #   1. Go to: https://github.com/<OWNER>/<REPO>/settings/actions/runners/new
-#   2. Select: Linux / x64
-#   3. Copy the token shown in the "Configure" step (starts with "AART...")
+#   2. Select: macOS / ARM64 (or x64 on Intel)
+#   3. Copy the token shown in the "Configure" step (starts with "AART...").
 #      It expires after 1 hour.
 #
 # Usage:
 #   export GITHUB_OWNER=<your-github-username-or-org>
 #   export GITHUB_REPO=<your-repo-name>
-#   export REGISTRATION_TOKEN=<token from GitHub UI>
+#   export RUNNER_TOKEN=<token from GitHub UI>
 #   ./scripts/setup-runner.sh
 #
-# Prerequisites:
-#   - Docker Desktop running
-#   - Registry already up (./scripts/setup-registry.sh)
+# The runner runs in the foreground. Ctrl-C to stop.
+# To run as a launchd service instead, see the comment at the bottom.
 
 set -euo pipefail
 
 : "${GITHUB_OWNER:?Set GITHUB_OWNER to your GitHub username or org}"
 : "${GITHUB_REPO:?Set GITHUB_REPO to your repository name}"
-: "${REGISTRATION_TOKEN:?Set REGISTRATION_TOKEN to the token from the GitHub UI}"
+: "${RUNNER_TOKEN:?Set RUNNER_TOKEN to the token from the GitHub UI}"
 
 RUNNER_NAME="${RUNNER_NAME:-local-runner}"
-RUNNER_IMAGE="ghcr.io/actions/actions-runner:latest"
-RUNNER_CONTAINER="gh-runner"
-NETWORK="attest"
+RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,local}"
+RUNNER_VERSION="${RUNNER_VERSION:-2.334.0}"
+RUNNER_DIR="${RUNNER_DIR:-${HOME}/actions-runner}"
 
-echo "==> Stopping any existing runner container..."
-docker rm -f "${RUNNER_CONTAINER}" 2>/dev/null || true
+ARCH_RAW=$(uname -m)
+case "${ARCH_RAW}" in
+  arm64) RUNNER_ARCH="arm64" ;;
+  x86_64) RUNNER_ARCH="x64" ;;
+  *) echo "ERROR: unsupported arch ${ARCH_RAW}" >&2; exit 1 ;;
+esac
 
-echo "==> Starting self-hosted runner container..."
-docker run -d \
-  --name "${RUNNER_CONTAINER}" \
-  --restart=unless-stopped \
-  --network "${NETWORK}" \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -e RUNNER_NAME="${RUNNER_NAME}" \
-  -e RUNNER_WORKDIR="/tmp/runner/work" \
-  -e RUNNER_LABELS="self-hosted,local" \
-  -e REPO_URL="https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}" \
-  -e REGISTRATION_TOKEN="${REGISTRATION_TOKEN}" \
-  "${RUNNER_IMAGE}"
+TARBALL="actions-runner-osx-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz"
+URL="https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/${TARBALL}"
 
-echo ""
-echo "==> Waiting for runner to register with GitHub (up to 30s)..."
-for i in $(seq 1 30); do
-  if docker logs "${RUNNER_CONTAINER}" 2>&1 | grep -q "Listening for Jobs"; then
-    echo "    Runner is ready!"
-    break
-  fi
-  sleep 1
-done
+REPO_URL="https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}"
 
+# ── 1. Download + extract runner binary ──────────────────────────────────────
+if [ ! -x "${RUNNER_DIR}/run.sh" ]; then
+  echo "==> Downloading runner v${RUNNER_VERSION} for osx-${RUNNER_ARCH}..."
+  mkdir -p "${RUNNER_DIR}"
+  curl -fsSL "${URL}" -o "/tmp/${TARBALL}"
+  tar xzf "/tmp/${TARBALL}" -C "${RUNNER_DIR}"
+  rm "/tmp/${TARBALL}"
+  echo "    Extracted to ${RUNNER_DIR}"
+else
+  echo "==> Runner binary already present at ${RUNNER_DIR}, skipping download."
+fi
+
+cd "${RUNNER_DIR}"
+
+# ── 2. Unconfigure any existing registration ──────────────────────────────────
+if [ -f ".runner" ]; then
+  echo "==> Found previous registration, removing..."
+  ./config.sh remove --token "${RUNNER_TOKEN}" 2>/dev/null \
+    || echo "    (remove failed — likely token already used; cleaning files manually)"
+  rm -f .runner .credentials .credentials_rsaparams
+fi
+
+# ── 3. Register with GitHub ──────────────────────────────────────────────────
+echo "==> Registering runner '${RUNNER_NAME}' with ${REPO_URL}..."
+./config.sh \
+  --url "${REPO_URL}" \
+  --token "${RUNNER_TOKEN}" \
+  --name "${RUNNER_NAME}" \
+  --labels "${RUNNER_LABELS}" \
+  --work "_work" \
+  --unattended \
+  --replace
+
+# ── 4. Start the runner (foreground) ─────────────────────────────────────────
 echo ""
-echo "✅ Runner '${RUNNER_NAME}' is registered and listening."
+echo "✅ Registered. Starting runner in foreground (Ctrl-C to stop)..."
+echo "   Verify at: ${REPO_URL}/settings/actions/runners"
 echo ""
-echo "   Verify at: https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/settings/actions/runners"
-echo ""
-echo "   To view runner logs:    docker logs -f ${RUNNER_CONTAINER}"
-echo "   To stop/remove runner:  docker rm -f ${RUNNER_CONTAINER}"
+./run.sh
+
+# To run as a launchd service instead of foreground:
+#   cd ${RUNNER_DIR}
+#   ./svc.sh install
+#   ./svc.sh start
+#   ./svc.sh status
+# To uninstall the service:
+#   ./svc.sh stop
+#   ./svc.sh uninstall

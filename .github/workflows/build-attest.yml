@@ -15,10 +15,9 @@ jobs:
       contents: read
 
     env:
-      # The registry container (local-registry) is on the 'attest' Docker network.
-      # The runner container is on the same network, so it reaches it as local-registry:5000.
-      # From your Mac the same registry is at localhost:5001.
-      REGISTRY: local-registry:5000
+      # The runner is the official actions/runner binary running natively on
+      # your Mac, so it reaches the local registry on localhost:5001 directly.
+      REGISTRY: localhost:5001
       IMAGE_NAME: hello-server
 
     steps:
@@ -65,7 +64,7 @@ jobs:
       # subject-name must be the fully-qualified image name WITHOUT a tag.
       - name: Attest build provenance
         id: attest
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.push.outputs.digest }}
