@@ -62,10 +62,20 @@ chmod +x scripts/setup-registry.sh scripts/teardown.sh scripts/setup-runner.sh
 ```
 
 Creates the Docker container **`local-registry`** → `localhost:5001` on your Mac.
+The registry is configured with htpasswd auth (`dummy`/`dummy`). This is
+**required** — `actions/attest-build-provenance` with `push-to-registry: true`
+uses `@sigstore/oci`, which crashes with `Invalid challenge:` when the registry
+doesn't issue a `WWW-Authenticate` header. Plain unauthenticated `registry:2`
+never issues one.
+
+Log in (so `docker pull` and `oras discover` work from your shell):
+```sh
+echo dummy | docker login localhost:5001 -u dummy --password-stdin
+```
 
 Verify:
 ```sh
-curl http://localhost:5001/v2/_catalog
+curl -u dummy:dummy http://localhost:5001/v2/_catalog
 # → {"repositories":[]}
 ```
 
@@ -147,9 +157,9 @@ gh workflow run build-attest.yml \
 # From the workflow run logs
 gh run view --repo <GITHUB_OWNER>/<GITHUB_REPO> --log | grep "Digest:"
 
-# Or from the registry API
+# Or from the registry API (registry uses htpasswd auth: dummy/dummy)
 COMMIT=$(git rev-parse HEAD)
-curl -s "http://localhost:5001/v2/hello-server/manifests/${COMMIT}" \
+curl -s -u dummy:dummy "http://localhost:5001/v2/hello-server/manifests/${COMMIT}" \
   -H "Accept: application/vnd.oci.image.manifest.v1+json" \
   | python3 -c "
 import sys, hashlib
@@ -303,6 +313,7 @@ actions/attest-build-provenance@v4
 | Constraint | Notes |
 |---|---|
 | `registry:2` OCI 1.1 support | v2.8.3+ supports the Referrers API. The setup script pulls `registry:2` (latest). If `--bundle-from-oci` returns 404, force-pull a newer image: `docker pull registry:2`. |
+| Registry must have auth configured | `@sigstore/oci` (used by `push-to-registry: true`) crashes with `Invalid challenge:` when the registry doesn't issue a `WWW-Authenticate` header. The setup script configures htpasswd auth (`dummy`/`dummy`) to satisfy this. `oras`, `curl`, and `docker` against the registry need `-u dummy:dummy` or a prior `docker login`. |
 | Private repo attestations | Private repos use GitHub's private Sigstore CA with no public Rekor log. `gh attestation verify` handles this automatically. `cosign verify-attestation` additionally needs `gh attestation trusted-root > trusted_root.jsonl` and `--trusted-root trusted_root.jsonl`. |
 | Runner OIDC reachability | The runner needs outbound HTTPS to `token.actions.githubusercontent.com`, `fulcio.githubapp.com`, and `api.github.com`. Standard internet egress on your Mac is fine. |
 | Port 5000 on macOS | macOS Monterey+ reserves port 5000 for AirPlay Receiver. The registry is exposed on **5001**. |

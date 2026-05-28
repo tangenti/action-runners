@@ -24,12 +24,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── Build ────────────────────────────────────────────────────────────────
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
         with:
-          # Use the host's Docker socket that the runner container mounts.
           driver: docker
+
+      - name: Log in to local registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: dummy
+          password: dummy
 
       - name: Build and push image to local registry
         id: push
@@ -37,34 +42,14 @@ jobs:
         with:
           context: .
           push: true
-          # Tag with the short SHA so every commit produces a unique image.
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-          # Plain docker driver writes the digest to stdout; capture it below.
 
-      # docker/build-push-action sets steps.push.outputs.digest = sha256:...
-      # when driver=docker and push=true. Verify it is populated.
       - name: Verify digest
         run: |
           echo "Digest: ${{ steps.push.outputs.digest }}"
           if [ -z "${{ steps.push.outputs.digest }}" ]; then
             echo "ERROR: digest is empty" >&2
             exit 1
-          fi
-
-      # actions/attest-build-provenance reads ~/.docker/config.json to find the
-      # auth header for the target registry. Our local registry is anonymous,
-      # but the action throws "No credentials found" if no auths entry exists.
-      # Writing dummy credentials satisfies the lookup; the registry ignores them.
-      - name: Add dummy credentials for local registry
-        run: |
-          mkdir -p ~/.docker
-          if [ -f ~/.docker/config.json ]; then
-            jq '.auths["${{ env.REGISTRY }}"] = {"auth": "ZHVtbXk6ZHVtbXk="}' \
-              ~/.docker/config.json > /tmp/docker-config.json
-            mv /tmp/docker-config.json ~/.docker/config.json
-          else
-            echo '{"auths":{"${{ env.REGISTRY }}":{"auth":"ZHVtbXk6ZHVtbXk="}}}' \
-              > ~/.docker/config.json
           fi
 
       - name: Attest build provenance

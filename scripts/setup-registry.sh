@@ -37,7 +37,23 @@ else
   docker network create "${NETWORK}"
 fi
 
-# ── 2. Start the registry container ──────────────────────────────────────────
+# Why htpasswd auth (even though we don't actually care about security)?
+# @sigstore/oci (used by actions/attest-build-provenance with push-to-registry: true)
+# crashes with "Invalid challenge: " when the registry doesn't issue a
+# WWW-Authenticate header. Plain registry:2 with no auth never issues one.
+# htpasswd auth makes the registry return `WWW-Authenticate: Basic realm="..."`
+# which @sigstore/oci can parse.
+AUTH_DIR="${HOME}/.attest-registry-auth"
+REGISTRY_USER="dummy"
+REGISTRY_PASS="dummy"
+
+if [ ! -f "${AUTH_DIR}/htpasswd" ]; then
+  echo "==> Generating htpasswd file (user: ${REGISTRY_USER})..."
+  mkdir -p "${AUTH_DIR}"
+  docker run --rm --entrypoint htpasswd httpd:2 \
+    -Bbn "${REGISTRY_USER}" "${REGISTRY_PASS}" > "${AUTH_DIR}/htpasswd"
+fi
+
 if docker inspect "${REGISTRY_NAME}" &>/dev/null; then
   echo "==> Registry '${REGISTRY_NAME}' already running, skipping."
 else
@@ -47,16 +63,21 @@ else
     --name "${REGISTRY_NAME}" \
     --network "${NETWORK}" \
     -p "127.0.0.1:${REGISTRY_PORT_HOST}:${REGISTRY_PORT_INTERNAL}" \
+    -v "${AUTH_DIR}:/auth:ro" \
+    -e REGISTRY_AUTH=htpasswd \
+    -e REGISTRY_AUTH_HTPASSWD_REALM=Registry \
+    -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd \
     registry:2
 fi
 
 echo ""
 echo "✅ Done!"
 echo ""
-echo "   Registry endpoints:"
-echo "     From your Mac:             localhost:${REGISTRY_PORT_HOST}"
-echo "     From containers on '${NETWORK}' network:  ${REGISTRY_NAME}:${REGISTRY_PORT_INTERNAL}"
+echo "   Registry endpoint:  localhost:${REGISTRY_PORT_HOST}"
+echo "   Credentials:        user=${REGISTRY_USER}  password=${REGISTRY_PASS}"
+echo ""
+echo "   Log in (writes to ~/.docker/config.json):"
+echo "     echo ${REGISTRY_PASS} | docker login localhost:${REGISTRY_PORT_HOST} -u ${REGISTRY_USER} --password-stdin"
 echo ""
 echo "   Verify:"
-echo "     curl http://localhost:${REGISTRY_PORT_HOST}/v2/_catalog"
-echo "     # → {\"repositories\":[]}"
+echo "     curl -u ${REGISTRY_USER}:${REGISTRY_PASS} http://localhost:${REGISTRY_PORT_HOST}/v2/_catalog"
